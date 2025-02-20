@@ -8,6 +8,8 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strings"
+	"time"
 )
 
 func init() {
@@ -34,18 +36,50 @@ func main() {
 		// copy res headers
 		fmt.Printf("headers: %v\n", res.Header)
 		for key, value := range res.Header {
-			fmt.Printf("key: %v value: %v\n", key, value)
-			w.Header().Set(key, value[0])
+			for _, v := range value {
+				w.Header().Set(key, v)
+			}
 		}
 		forwardedFor, _, err := net.SplitHostPort(r.RemoteAddr)
 		if err != nil {
-			fmt.Printf("error splitting HostPort: ", err)
+			fmt.Printf("error splitting HostPort: %v", err)
 		}
 
+		// Handle streaming
+		done := make(chan bool)
+		go func() {
+			for {
+				select {
+				case <-time.Tick(10 * time.Millisecond):
+					w.(http.Flusher).Flush()
+				case <-done:
+					return
+				}
+			}
+		}()
+
+		// handle trailer (trailer headers)
+		trailerKeys := []string{}
+		for key := range r.Trailer {
+			trailerKeys = append(trailerKeys, key)
+		}
+
+		w.Header().Set("Trailer", strings.Join(trailerKeys, ","))
+
+		// add sender ip to x-forwarded-for header
 		w.Header().Set("X-FORWARDED-FOR", forwardedFor)
-		// copy res body
+
 		w.WriteHeader(res.StatusCode)
+		// copy res body
 		io.Copy(w, res.Body)
+		// fill trailer headers
+		for keys, values := range r.Trailer {
+			for _, value := range values {
+				w.Header().Set(keys, value)
+			}
+		}
+		// to stop streaming when done
+		close(done)
 	})
 	addr := ":8080"
 	http.ListenAndServe(addr, proxy)
